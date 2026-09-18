@@ -444,3 +444,54 @@ table.matrix input:focus {
   text-align: right;
   color: var(--text);
 }
+
+.candidate-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.candidate-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  border-radius: 8px;
+  padding: 12px 14px;
+  cursor: pointer;
+}
+
+.candidate-row:hover {
+  border-color: var(--accent);
+}
+
+.candidate-row.selected {
+  border-color: var(--good);
+  box-shadow: inset 0 0 0 1px var(--good);
+}
+
+.candidate-row input[type='radio'] {
+  margin-top: 4px;
+  accent-color: var(--good);
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+}
+
+.candidate-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.candidate-rank {
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.candidate-cost {
+  font-family: var(--mono);
+  font-size: 16px;
+  color: var(--accent);
+  white-space: nowrap;
+}

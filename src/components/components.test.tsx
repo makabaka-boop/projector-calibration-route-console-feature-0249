@@ -3,7 +3,11 @@ import { describe, expect, it, beforeEach, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { MatrixEditor } from './MatrixEditor';
 import { ExecutionConsole } from './ExecutionConsole';
-import { type CalibrationPlan, createDefaultPlan } from '../solver/plan';
+import { CandidatePicker } from './CandidatePicker';
+import { App } from '../App';
+import { type CalibrationPlan, createDefaultPlan, matrixToNested } from '../solver/plan';
+import { solveTopRoutes } from '../solver/tsp';
+import { makeRng, randomMatrix } from '../solver/brute';
 
 function planWith(n: number, edge = 1): CalibrationPlan {
   const p = createDefaultPlan(n);
@@ -119,5 +123,130 @@ describe('ExecutionConsole 组件', () => {
   it('禁止提前回库：未全部完成时没有回库按钮', () => {
     render(<ExecutionConsole plan={planWith(8, 1)} onAbort={() => {}} />);
     expect(screen.queryByRole('button', { name: /返回停放位/ })).toBeNull();
+  });
+
+  it('候选集一次给出三条互异路线，逐条显示排名、总耗时与 0 起 0 收完整路径', () => {
+    const n = 8;
+    const flat = randomMatrix(n + 1, makeRng(20260919));
+    const plan: CalibrationPlan = { n, matrixFlat: flat };
+    const set = solveTopRoutes(flat, n + 1, [1, 2, 3, 4, 5, 6, 7, 8], 0, 0);
+    expect(set.candidates).toHaveLength(3);
+    const onSelect = vi.fn();
+    render(
+      <CandidatePicker
+        plan={plan}
+        candidateSet={set}
+        selectedRank={1}
+        onSelect={onSelect}
+      />,
+    );
+
+    for (const c of set.candidates) {
+      const row = screen.getByTestId(`candidate-row-${c.rank}`);
+      expect(row.textContent).toContain(`第 ${c.rank} 名`);
+      expect(row.textContent).toContain(`总耗时 ${c.cost}`);
+      // 完整路径文本：0 起 0 收，每个姿态出现
+      for (const pose of c.sequence) {
+        expect(row.textContent).toContain(String(pose));
+      }
+      const radio = row.querySelector(
+        `input[type="radio"][aria-label="选择候选路线第 ${c.rank} 名"]`,
+      ) as HTMLInputElement;
+      expect(radio).toBeTruthy();
+      expect(radio.checked).toBe(c.rank === 1); // 默认首名
+    }
+
+    // 改选第二名
+    const second = screen.getByLabelText('选择候选路线第 2 名') as HTMLInputElement;
+    fireEvent.click(second);
+    expect(onSelect).toHaveBeenCalledWith(2);
+  });
+
+  it('全等费用矩阵：候选前三即锁定序列，且全部可点选', () => {
+    const plan = planWith(8, 1);
+    const set = solveTopRoutes(plan.matrixFlat, 9, [1, 2, 3, 4, 5, 6, 7, 8], 0, 0);
+    expect(set.candidates.map((c) => c.sequence.join(','))).toEqual([
+      '1,2,3,4,5,6,7,8',
+      '1,2,3,4,5,6,8,7',
+      '1,2,3,4,5,7,6,8',
+    ]);
+    render(
+      <CandidatePicker plan={plan} candidateSet={set} selectedRank={1} onSelect={() => {}} />,
+    );
+    expect(screen.getByLabelText('选择候选路线第 3 名')).toBeTruthy();
+  });
+
+  it('执行台以次优候选为基线：初始增量为负并给出提示，沿基线走完增量归零', () => {
+    const n = 8;
+    const flat = randomMatrix(n + 1, makeRng(8686));
+    const plan: CalibrationPlan = { n, matrixFlat: flat };
+    const set = solveTopRoutes(flat, n + 1, [1, 2, 3, 4, 5, 6, 7, 8], 0, 0);
+    // 需要严格次优；若恰好同费则跳过本组件断言
+    if (set.candidates[1]!.cost === set.candidates[0]!.cost) return;
+    const second = set.candidates[1]!;
+
+    render(
+      <ExecutionConsole plan={plan} baseline={second} baselineRank={2} onAbort={() => {}} />,
+    );
+
+    // 基线标题与增量卡
+    expect(screen.getByText(/所选候选基线总耗时（第 2 名）/)).toBeTruthy();
+    const deltaBox = screen.getByTestId('delta-vs-baseline');
+    const expectedDelta = set.candidates[0]!.cost - second.cost;
+    expect(expectedDelta).toBeLessThan(0);
+    expect(deltaBox.textContent).toBe(String(expectedDelta));
+    expect(screen.getByRole('status').textContent).toContain('增量为负');
+
+    // 沿所选次优基线逐站确认；走到最后实际路线即次优路线，回库后增量为 0
+    for (const pose of second.sequence) {
+      fireEvent.click(screen.getByTitle(new RegExp(`确认姿态 ${pose} 为下一站`)));
+    }
+    fireEvent.click(screen.getByRole('button', { name: /返回停放位/ }));
+    expect(screen.getByText('已回到停放位 0，结案')).toBeTruthy();
+    expect(screen.getByText(/0（与基线一致）/)).toBeTruthy();
+  });
+});
+
+describe('App：应用新矩阵时旧候选与选择一起失效', () => {
+  beforeEach(() => localStorage.clear());
+
+  it('改选第二名后应用新矩阵，选择重置为候选首名', () => {
+    render(<App />);
+
+    // 默认 N=12 等费矩阵：改选候选第 2 名
+    const radio2 = screen.getByLabelText('选择候选路线第 2 名') as HTMLInputElement;
+    fireEvent.click(radio2);
+    expect(radio2.checked).toBe(true);
+    expect(
+      (screen.getByLabelText('选择候选路线第 1 名') as HTMLInputElement).checked,
+    ).toBe(false);
+
+    // 进入执行台：基线标注为第 2 名
+    fireEvent.click(screen.getByRole('button', { name: /开始执行/ }));
+    expect(screen.getByText(/所选候选基线总耗时（第 2 名）/)).toBeTruthy();
+
+    // 回编辑台，应用一份随机 N=8 矩阵
+    fireEvent.click(screen.getByRole('button', { name: /放弃执行/ }));
+
+    const n = 8;
+    const flat = randomMatrix(n + 1, makeRng(5150));
+    const nextPlan: CalibrationPlan = { n, matrixFlat: flat };
+
+    // 通过 MatrixEditor 的 JSON 文本框导入并应用（走真实校验/落盘链路）
+    fireEvent.change(screen.getByPlaceholderText(/n/), {
+      target: { value: JSON.stringify({ n, matrix: matrixToNested(nextPlan) }) },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /解析并载入草稿/ }));
+    fireEvent.click(screen.getByRole('button', { name: /校验并应用/ }));
+
+    // 新矩阵候选集已换：只有首名被选中，旧的“第 2 名”选择失效
+    const first = screen.getByLabelText('选择候选路线第 1 名') as HTMLInputElement;
+    const secondAfter = screen.getByLabelText('选择候选路线第 2 名') as HTMLInputElement;
+    expect(first.checked).toBe(true);
+    expect(secondAfter.checked).toBe(false);
+
+    // 执行台基线恢复第 1 名
+    fireEvent.click(screen.getByRole('button', { name: /开始执行/ }));
+    expect(screen.getByText(/所选候选基线总耗时（第 1 名）/)).toBeTruthy();
   });
 });

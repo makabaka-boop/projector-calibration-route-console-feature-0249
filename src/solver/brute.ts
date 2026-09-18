@@ -19,20 +19,56 @@ export function bruteForceOptimal(
   origin: number,
   home: number,
 ): BruteResult {
-  const targets = Array.from(targetsIn).sort((a, b) => a - b);
-  let best = Infinity;
-  let bestSeq: number[] = [];
+  const top = bruteForceTopK(flat, dim, targetsIn, origin, home, 1);
+  return { sequence: top[0]!.sequence, cost: top[0]!.cost };
+}
 
+export interface BruteCandidate {
+  sequence: number[];
+  cost: number;
+}
+
+/**
+ * 枚举 targets 的全部互异排列（回溯按编号升序，即字典序），逐边复算
+ * origin -> 排列 -> home 的费用，返回按 （费用升序，同费按完整序列字典序升序）
+ * 排列的前 k 名；互异排列总数不足 k 时只返回实际数量。
+ *
+ * 每一次访问末端都拿完整费用与当前榜做有序插入；同一排列只出现一次，天然互异。
+ */
+export function bruteForceTopK(
+  flat: ArrayLike<number>,
+  dim: number,
+  targetsIn: ArrayLike<number>,
+  origin: number,
+  home: number,
+  k: number,
+): BruteCandidate[] {
+  const targets = Array.from(targetsIn).sort((a, b) => a - b);
   const edge = (a: number, b: number) => flat[a * dim + b]!;
+
+  if (targets.length === 0) {
+    return [{ sequence: [], cost: edge(origin, home) }];
+  }
+
+  const top: BruteCandidate[] = [];
+
+  // 字典序枚举到的序列，在“同费”这一并列组内必然按字典序到达；
+  // 同费用下只对首个出现的较小序列严格让位，整榜最终即 (费用, 字典序) 有序。
+  const offer = (seq: number[], total: number) => {
+    for (let t = 0; t < top.length; t++) {
+      const cur = top[t]!;
+      if (total < cur.cost || (total === cur.cost && lexLess(seq, cur.sequence))) {
+        top.splice(t, 0, { sequence: seq.slice(), cost: total });
+        if (top.length > k) top.pop();
+        return;
+      }
+    }
+    if (top.length < k) top.push({ sequence: seq.slice(), cost: total });
+  };
 
   const visit = (perm: number[], used: boolean[], cost: number, last: number) => {
     if (perm.length === targets.length) {
-      const total = cost + edge(last, home);
-      // targets 升序且回溯按索引升序，首个排列即字典序最小，用严格小于保持之
-      if (total < best) {
-        best = total;
-        bestSeq = perm.slice();
-      }
+      offer(perm, cost + edge(last, home));
       return;
     }
     for (let i = 0; i < targets.length; i++) {
@@ -46,7 +82,15 @@ export function bruteForceOptimal(
   };
 
   visit([], new Array(targets.length).fill(false), 0, origin);
-  return { sequence: bestSeq, cost: best };
+  return top;
+}
+
+function lexLess(a: number[], b: number[]): boolean {
+  const len = Math.min(a.length, b.length);
+  for (let i = 0; i < len; i++) {
+    if (a[i]! !== b[i]!) return a[i]! < b[i]!;
+  }
+  return a.length < b.length;
 }
 
 /** 可复现的简单伪随机数（mulberry32） */

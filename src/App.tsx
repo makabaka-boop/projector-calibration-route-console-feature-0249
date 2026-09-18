@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { type CalibrationPlan, createDefaultPlan } from './solver/plan';
-import { solveOptimal } from './solver/tsp';
+import { solveTopRoutes } from './solver/tsp';
 import { MatrixEditor } from './components/MatrixEditor';
 import { ExecutionConsole } from './components/ExecutionConsole';
+import { CandidatePicker } from './components/CandidatePicker';
 import { loadPlan, savePlan } from './state/storage';
 
 type Tab = 'edit' | 'execute';
@@ -14,10 +15,28 @@ export function App() {
   });
   const [tab, setTab] = useState<Tab>('edit');
   const [planVersion, setPlanVersion] = useState(0); // 进入执行台时重建执行状态
+  // 工程师在候选集中的选择（全局名次，1 起）；默认首名。
+  const [selectedRank, setSelectedRank] = useState(1);
+
+  // 当前已生效计划的校准路线候选集（扩展 Held–Karp 一次给出前三名互异精确路线）。
+  // 应用新矩阵时 plan 引用更换，旧候选与选择随之失效：下面的 effect 立即重算并重置选择。
+  const allTargets = useMemo(
+    () => Array.from({ length: plan.n }, (_, k) => k + 1),
+    [plan.n],
+  );
+  const candidateSet = useMemo(
+    () => solveTopRoutes(plan.matrixFlat, plan.n + 1, allTargets, 0, 0),
+    [plan, allTargets],
+  );
+
+  // 新计划生效：选择回到候选首名（旧候选与旧选择一起作废）。
+  useEffect(() => {
+    setSelectedRank(1);
+  }, [plan]);
 
   function applyPlan(next: CalibrationPlan) {
     savePlan(next);
-    setPlan(next);
+    setPlan(next); // 引用变化即触发候选重算与选择重置
   }
 
   function resetToDefault() {
@@ -26,14 +45,9 @@ export function App() {
     setPlan(fallback);
   }
 
-  // 当前计划的最优路线摘要（编辑台可见，证明求解器真实运行）
-  const summary = solveOptimal(
-    plan.matrixFlat,
-    plan.n + 1,
-    Array.from({ length: plan.n }, (_, k) => k + 1),
-    0,
-    0,
-  );
+  const selected =
+    candidateSet.candidates.find((c) => c.rank === selectedRank) ??
+    candidateSet.candidates[0]!;
 
   return (
     <div className="app">
@@ -48,7 +62,7 @@ export function App() {
         <div className="row">
           <button className="btn" onClick={resetToDefault}>
             恢复默认计划（N=12）
-            </button>
+          </button>
         </div>
       </header>
 
@@ -66,49 +80,31 @@ export function App() {
             setTab('execute');
           }}
         >
-          2. 开始执行
-          </button>
+          2. 开始执行（当前选择：候选第 {selected.rank} 名）
+        </button>
       </nav>
 
       {tab === 'edit' && (
         <>
-          <div className="panel">
-            <h2>当前已生效计划的精确解</h2>
-            <div className="metric-grid">
-              <div className="metric">
-                <div className="label">姿态数 N</div>
-                <div className="value">{plan.n}</div>
-              </div>
-              <div className="metric">
-                <div className="label">最小总耗时</div>
-                <div className="value good">{summary.cost}</div>
-              </div>
-              <div className="metric">
-                <div className="label">求解耗时</div>
-                <div className="value" style={{ fontSize: 15 }}>
-                  {summary.solveMs.toFixed(2)} ms
-                </div>
-              </div>
-            </div>
-            <div className="route-line" style={{ marginTop: 8 }}>
-              {summary.tour.map((node, idx) => (
-                <span key={idx}>
-                  <span className={`node ${node === 0 ? 'home' : ''}`}>{node}</span>
-                  {idx < summary.tour.length - 1 && <span className="arrow">→</span>}
-                </span>
-              ))}
-            </div>
-            <div className="hint">
-              并列最优时取姿态序列字典序最小者。改完矩阵请点“校验并应用”，新结果在此即时更新。
-            </div>
-          </div>
+          <CandidatePicker
+            plan={plan}
+            candidateSet={candidateSet}
+            selectedRank={selected.rank}
+            onSelect={setSelectedRank}
+          />
 
           <MatrixEditor plan={plan} onApply={applyPlan} />
         </>
       )}
 
       {tab === 'execute' && (
-        <ExecutionConsole key={planVersion} plan={plan} onAbort={() => setTab('edit')} />
+        <ExecutionConsole
+          key={planVersion}
+          plan={plan}
+          baseline={selected}
+          baselineRank={selected.rank}
+          onAbort={() => setTab('edit')}
+        />
       )}
     </div>
   );

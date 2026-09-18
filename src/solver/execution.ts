@@ -2,20 +2,24 @@
  * 现场执行状态机（纯函数，不依赖 React，便于验收逐拍核对）。
  *
  * 流程：
- * - startExecution：以 0 为起点算出全局最优原计划。
+ * - startExecution：以工程师在校准路线候选集中选定的路线（默认候选首名，即精确
+ *   最优）作为“原计划及增量基线”；初始最短后缀仍是当前剩余姿态集合上的精确最优，
+ *   因此基线本身是次优候选时，初始增量允许为负。
  * - confirmNext：工程师把任一“未完成”姿态确认为实际下一站；
  *   累加实际已发生费用，并以该姿态为新起点，对全部剩余姿态精确重排（Held–Karp），
- *   得到最短收尾路线、预计完工耗时及相对原计划的增量。
+ *   得到最短收尾路线、预计完工耗时及相对“所选候选基线”的增量。
  * - finishReturn：剩余为空后，回到停放位 0，结算最终费用。
  */
 
 import { type CalibrationPlan } from './plan';
-import { solveOptimal, type OptimalRoute } from './tsp';
+import { solveOptimal, type OptimalRoute, type RouteCandidate } from './tsp';
 
 export interface ExecutionState {
   plan: CalibrationPlan;
-  /** 原计划：从 0 出发、访问 1..N 各一次并回到 0 的最优解 */
+  /** 基线计划：工程师所选的校准路线候选（默认候选首名 = 精确最优） */
   original: OptimalRoute;
+  /** 基线候选的全局名次（1 起）；默认 1 */
+  baselineRank: number;
   /** 已确认姿态（按确认顺序） */
   visited: number[];
   /** 当前所在点：初始为 0，确认后为最新姿态，回库后为 0 */
@@ -24,23 +28,47 @@ export interface ExecutionState {
   incurred: number;
   /** 尚未访问的姿态（升序） */
   remaining: number[];
-  /** 从 current 出发、遍历 remaining 回到 0 的精确最优后缀 */
+  /** 从 current 出发、遍历 remaining 回到 0 的精确最短后缀 */
   suffix: OptimalRoute;
   /** 是否已回到停放位 0 结案 */
   finished: boolean;
 }
 
-export function startExecution(plan: CalibrationPlan): ExecutionState {
+/**
+ * 开始执行。baseline 为工程师选定的候选路线；省略时取候选首名（精确最优），
+ * 兼容既有“原计划即最优”的现场后缀重排流程。
+ */
+export function startExecution(
+  plan: CalibrationPlan,
+  baseline?: RouteCandidate,
+): ExecutionState {
   const all = range1(plan.n);
-  const original = solveOptimal(plan.matrixFlat, plan.n + 1, all, 0, 0);
+  const selected: OptimalRoute = baseline
+    ? {
+        sequence: baseline.sequence,
+        tour: baseline.tour,
+        cost: baseline.cost,
+        targetCount: baseline.targetCount,
+        solveMs: 0,
+      }
+    : solveOptimal(plan.matrixFlat, plan.n + 1, all, 0, 0);
+
+  // 初始后缀始终是“从 0 出发遍历全部姿态”的精确最短后缀（而非基线照抄）：
+  // 基线选次优候选时，最短后缀严格更短，初始增量即为负。
+  const suffix =
+    baseline && baseline.rank === 1
+      ? { ...selected, solveMs: 0 }
+      : solveOptimal(plan.matrixFlat, plan.n + 1, all, 0, 0);
+
   return {
     plan,
-    original,
+    original: selected,
+    baselineRank: baseline ? baseline.rank : 1,
     visited: [],
     current: 0,
     incurred: 0,
     remaining: all,
-    suffix: original,
+    suffix,
     finished: false,
   };
 }
@@ -95,12 +123,15 @@ export function finishReturn(state: ExecutionState): ExecutionState {
   };
 }
 
-/** 预计完工总耗时 = 已发生 + 当前最优后缀（含回 0） */
+/** 预计完工总耗时 = 已发生 + 当前精确最短后缀（含回 0） */
 export function projectedTotal(state: ExecutionState): number {
   return state.incurred + state.suffix.cost;
 }
 
-/** 相对原计划的增量（正数表示偏离导致的额外耗时） */
+/**
+ * 相对所选候选基线的增量。
+ * 基线为次优候选时，尚未偏离的初始状态即可能为负（精确最短后缀优于所选路线）。
+ */
 export function deltaVsOriginal(state: ExecutionState): number {
   return projectedTotal(state) - state.original.cost;
 }

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { type CalibrationPlan } from '../solver/plan';
+import { type RouteCandidate } from '../solver/tsp';
 import {
   type ExecutionState,
   confirmNext,
@@ -8,16 +9,26 @@ import {
   projectedTotal,
   startExecution,
 } from '../solver/execution';
+import { RouteLine } from './RouteLine';
 
 interface ExecutionConsoleProps {
   plan: CalibrationPlan;
+  /** 工程师选定的校准路线候选；省略时默认候选首名（精确最优） */
+  baseline?: RouteCandidate;
+  /** 基线候选的全局名次（1 起），用于台账展示 */
+  baselineRank?: number;
   /** 放弃当前执行（计划不变） */
   onAbort: () => void;
 }
 
-/** 执行台：精确原计划 + 现场改序后每拍精确重排最短后缀。 */
-export function ExecutionConsole({ plan, onAbort }: ExecutionConsoleProps) {
-  const [state, setState] = useState<ExecutionState>(() => startExecution(plan));
+/** 执行台：所选候选为基线 + 现场改序后每拍精确重排最短后缀。 */
+export function ExecutionConsole({
+  plan,
+  baseline,
+  baselineRank,
+  onAbort,
+}: ExecutionConsoleProps) {
+  const [state, setState] = useState<ExecutionState>(() => startExecution(plan, baseline));
   const [error, setError] = useState<string>('');
 
   function confirm(pose: number) {
@@ -43,6 +54,7 @@ export function ExecutionConsole({ plan, onAbort }: ExecutionConsoleProps) {
   const dim = plan.n + 1;
   const edgeAt = (a: number, b: number) => plan.matrixFlat[a * dim + b]!;
   const recommendedNext = state.suffix.sequence[0];
+  const rank = baselineRank ?? state.baselineRank;
 
   return (
     <div>
@@ -67,7 +79,7 @@ export function ExecutionConsole({ plan, onAbort }: ExecutionConsoleProps) {
 
         <div className="metric-grid">
           <div className="metric">
-            <div className="label">原计划总耗时（精确最优）</div>
+            <div className="label">所选候选基线总耗时（第 {rank} 名）</div>
             <div className="value">{state.original.cost}</div>
           </div>
           <div className="metric">
@@ -79,8 +91,11 @@ export function ExecutionConsole({ plan, onAbort }: ExecutionConsoleProps) {
             <div className="value">{projected}</div>
           </div>
           <div className="metric">
-            <div className="label">相对原计划增量</div>
-            <div className={`value ${delta > 0 ? 'bad' : 'good'}`}>
+            <div className="label">相对所选候选增量</div>
+            <div
+              className={`value ${delta > 0 ? 'bad' : delta < 0 ? 'good' : ''}`}
+              data-testid="delta-vs-baseline"
+            >
               {delta > 0 ? `+${delta}` : `${delta}`}
             </div>
           </div>
@@ -96,6 +111,13 @@ export function ExecutionConsole({ plan, onAbort }: ExecutionConsoleProps) {
           </div>
         </div>
 
+        {delta < 0 && !state.finished && (
+          <div className="alert info" role="status">
+            基线是第 {rank} 名次优候选：当前精确最短收尾比所选路线短 {-delta}
+            ，故增量为负。现场一旦偏离最短后缀，增量仍可能转为正数。
+          </div>
+        )}
+
         {error && (
           <div className="alert error" role="alert">
             {error}
@@ -104,12 +126,8 @@ export function ExecutionConsole({ plan, onAbort }: ExecutionConsoleProps) {
       </div>
 
       <div className="panel">
-        <h3>原计划（字典序最小的最优路线）</h3>
-        <RouteLine
-          tour={state.original.tour}
-          edgeAt={edgeAt}
-          visited={new Set()}
-        />
+        <h3>所选校准路线（候选第 {rank} 名；增量基线）</h3>
+        <RouteLine tour={state.original.tour} edgeAt={edgeAt} visited={new Set()} />
       </div>
 
       <div className="panel">
@@ -199,12 +217,20 @@ export function ExecutionConsole({ plan, onAbort }: ExecutionConsoleProps) {
                 <td className="num">{state.incurred}</td>
               </tr>
               <tr>
-                <th>原计划最优总耗时</th>
+                <th>所选候选基线总耗时（第 {rank} 名）</th>
                 <td className="num">{state.original.cost}</td>
               </tr>
               <tr>
-                <th>现场改序造成的额外耗时</th>
-                <td className="num">{delta > 0 ? `+${delta}` : '0（与原计划一致）'}</td>
+                <th>相对所选候选的增量</th>
+                <td className="num">
+                  {delta > 0
+                    ? `+${delta}`
+                    : delta < 0
+                      ? `${delta}`
+                      : rank === 1
+                        ? '0（与原计划一致）'
+                        : '0（与基线一致）'}
+                </td>
               </tr>
             </tbody>
           </table>
@@ -215,40 +241,6 @@ export function ExecutionConsole({ plan, onAbort }: ExecutionConsoleProps) {
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-function RouteLine(props: {
-  tour: number[];
-  edgeAt: (a: number, b: number) => number;
-  visited: Set<number>;
-}) {
-  const { tour, edgeAt, visited } = props;
-  const unique: number[] = [];
-  for (let i = 0; i < tour.length; i++) {
-    if (i === 0 || tour[i] !== tour[i - 1]) unique.push(tour[i]!);
-  }
-  return (
-    <div className="route-line">
-      {unique.map((node, idx) => {
-        const next = unique[idx + 1];
-        const isHome = node === 0;
-        const isDone = visited.has(node);
-        return (
-          <span key={idx}>
-            <span className={['node', isHome ? 'home' : '', isDone ? 'done' : ''].join(' ')}>
-              {isHome ? '0 停放' : node}
-            </span>
-            {next !== undefined && (
-              <>
-                <span className="arrow">→</span>
-                <span className="edgecost">[{edgeAt(node, next)}]</span>
-              </>
-            )}
-          </span>
-        );
-      })}
     </div>
   );
 }

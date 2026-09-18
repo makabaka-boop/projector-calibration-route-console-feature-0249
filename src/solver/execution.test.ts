@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { type CalibrationPlan } from './plan';
+import { solveTopRoutes, type RouteCandidate } from './tsp';
 import {
   confirmNext,
   deltaVsOriginal,
@@ -8,7 +9,7 @@ import {
   routeCost,
   startExecution,
 } from './execution';
-import { bruteForceOptimal, makeRng, randomMatrix } from './brute';
+import { bruteForceOptimal, bruteForceTopK, makeRng, randomMatrix } from './brute';
 
 function planFromFlat(n: number, flat: number[]): CalibrationPlan {
   return { n, matrixFlat: flat };
@@ -143,4 +144,78 @@ describe('现场执行与逐步重排', () => {
     expect(() => confirmNext(state, 1)).toThrow(/已结案/);
     expect(() => finishReturn(state)).toThrow(/已结案/);
   });
+
+  it('选次优候选为基线：初始增量为负，现场确认后仍逐拍精确最短后缀', () => {
+    const n = 6;
+    const flat = randomMatrix(n + 1, makeRng(31337));
+    const plan = planFromFlat(n, flat);
+
+    const top = solveTopRoutes(flat, n + 1, range1(n), 0, 0);
+    // 该随机矩阵前三名费用必须互异，才能构造“严格次优基线”
+    expect(top.candidates).toHaveLength(3);
+    if (top.candidates[1]!.cost === top.candidates[0]!.cost) {
+      return; // 小概率同费，换不到严格次优时本组跳过
+    }
+    const suboptimal: RouteCandidate = top.candidates[1]!;
+    expect(suboptimal.cost).toBeGreaterThan(top.candidates[0]!.cost);
+
+    const initial = startExecution(plan, suboptimal);
+    // 基线就是所选的第二名
+    expect(initial.baselineRank).toBe(2);
+    expect(initial.original.sequence).toEqual(suboptimal.sequence);
+    expect(initial.original.cost).toBe(suboptimal.cost);
+    // 初始后缀仍是精确最短（候选首名），预计完工严格小于次优基线 ⇒ 增量为负
+    const bruteBest = bruteForceOptimal(flat, n + 1, range1(n), 0, 0);
+    expect(initial.suffix.cost).toBe(bruteBest.cost);
+    expect(projectedTotal(initial)).toBe(bruteBest.cost);
+    expect(deltaVsOriginal(initial)).toBe(bruteBest.cost - suboptimal.cost);
+    expect(deltaVsOriginal(initial)).toBeLessThan(0);
+
+    // 现场确认任意未完成姿态后，后缀仍是该状态下的精确最短后缀（与穷举一致）
+    const deviationOrder = [4, 1, 6, 2, 5, 3];
+    let state = initial;
+    const path = [0];
+    let incurred = 0;
+    for (const pose of deviationOrder) {
+      const prev = path[path.length - 1]!;
+      state = confirmNext(state, pose);
+      path.push(pose);
+      incurred += flat[prev * (n + 1) + pose]!;
+
+      const brute = bruteForceOptimal(flat, n + 1, state.remaining, pose, 0);
+      expect(state.suffix.cost).toBe(brute.cost);
+      expect(state.suffix.sequence).toEqual(brute.sequence);
+      expect(state.incurred).toBe(routeCost(flat, n + 1, path));
+      // 增量始终相对“所选次优基线”计算
+      expect(deltaVsOriginal(state)).toBe(incurred + brute.cost - suboptimal.cost);
+    }
+    state = finishReturn(state);
+    expect(state.finished).toBe(true);
+    expect(state.incurred).toBe(routeCost(flat, n + 1, [...path, 0]));
+  });
+
+  it('基线候选的费用可由当前矩阵逐边复算，前三名与全排列一致', () => {
+    const n = 6;
+    const flat = randomMatrix(n + 1, makeRng(2024));
+    const plan = planFromFlat(n, flat);
+    const top = solveTopRoutes(flat, n + 1, range1(n), 0, 0);
+    const brute = bruteForceTopK(flat, n + 1, range1(n), 0, 0, 3);
+    expect(top.candidates).toHaveLength(3);
+    for (let r = 0; r < 3; r++) {
+      expect(top.candidates[r]!.cost).toBe(brute[r]!.cost);
+      expect(top.candidates[r]!.sequence).toEqual(brute[r]!.sequence);
+      expect(routeCost(flat, n + 1, top.candidates[r]!.tour)).toBe(brute[r]!.cost);
+    }
+
+    // 选第三名进入执行台：基线名次 3
+    const state = startExecution(plan, top.candidates[2]!);
+    expect(state.baselineRank).toBe(3);
+    expect(state.original.tour).toEqual(top.candidates[2]!.tour);
+  });
 });
+
+function range1(n: number): number[] {
+  const out: number[] = [];
+  for (let i = 1; i <= n; i++) out.push(i);
+  return out;
+}
