@@ -2,11 +2,15 @@
  * 现场执行状态机（纯函数，不依赖 React，便于验收逐拍核对）。
  *
  * 流程：
- * - startExecution：以 0 为起点算出全局最优原计划。
+ * - startExecution：以 0 为起点算出精确最优后缀；原计划基线默认取精确最优
+ *   （候选首名），也可传入工程师在候选集中改选的次优路线。
  * - confirmNext：工程师把任一“未完成”姿态确认为实际下一站；
  *   累加实际已发生费用，并以该姿态为新起点，对全部剩余姿态精确重排（Held–Karp），
- *   得到最短收尾路线、预计完工耗时及相对原计划的增量。
+ *   得到最短收尾路线、预计完工耗时及相对原计划基线的增量。
  * - finishReturn：剩余为空后，回到停放位 0，结算最终费用。
+ *
+ * 注意：无论基线是哪条候选，每一拍的后缀始终是当前状态的精确最短后缀，
+ * 因此当基线是次优候选时，增量允许为负（实际走得比所选次优路线更省）。
  */
 
 import { type CalibrationPlan } from './plan';
@@ -14,7 +18,7 @@ import { solveOptimal, type OptimalRoute } from './tsp';
 
 export interface ExecutionState {
   plan: CalibrationPlan;
-  /** 原计划：从 0 出发、访问 1..N 各一次并回到 0 的最优解 */
+  /** 原计划基线：从 0 出发、访问 1..N 各一次并回到 0 的所选候选（默认精确最优） */
   original: OptimalRoute;
   /** 已确认姿态（按确认顺序） */
   visited: number[];
@@ -30,17 +34,22 @@ export interface ExecutionState {
   finished: boolean;
 }
 
-export function startExecution(plan: CalibrationPlan): ExecutionState {
+/**
+ * 开始执行。
+ * @param original 原计划基线（候选集中工程师所选路线）；缺省为精确最优（候选首名）。
+ *                 初始后缀始终是精确最优后缀，与基线选择无关。
+ */
+export function startExecution(plan: CalibrationPlan, original?: OptimalRoute): ExecutionState {
   const all = range1(plan.n);
-  const original = solveOptimal(plan.matrixFlat, plan.n + 1, all, 0, 0);
+  const optimal = solveOptimal(plan.matrixFlat, plan.n + 1, all, 0, 0);
   return {
     plan,
-    original,
+    original: original ?? optimal,
     visited: [],
     current: 0,
     incurred: 0,
     remaining: all,
-    suffix: original,
+    suffix: optimal,
     finished: false,
   };
 }
@@ -100,7 +109,7 @@ export function projectedTotal(state: ExecutionState): number {
   return state.incurred + state.suffix.cost;
 }
 
-/** 相对原计划的增量（正数表示偏离导致的额外耗时） */
+/** 相对原计划基线（所选候选）的增量；基线为次优路线时允许为负 */
 export function deltaVsOriginal(state: ExecutionState): number {
   return projectedTotal(state) - state.original.cost;
 }

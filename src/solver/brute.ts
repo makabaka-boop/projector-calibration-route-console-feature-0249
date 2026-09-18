@@ -49,8 +49,54 @@ export function bruteForceOptimal(
   return { sequence: bestSeq, cost: best };
 }
 
-/** 可复现的简单伪随机数（mulberry32） */
-export function makeRng(seed: number): () => number {
+/**
+ * 全排列预言机（前 k 名）：枚举 targets 的全部排列，按
+ * “总费用升序、同费按姿态序列字典序升序”排序后取前 k 条。
+ * 排列两两不同，故结果天然互异；排列不足 k 条时只返回实际数量。
+ */
+export function bruteForceTopK(
+  flat: ArrayLike<number>,
+  dim: number,
+  targetsIn: ArrayLike<number>,
+  origin: number,
+  home: number,
+  k = 3,
+): BruteResult[] {
+  const targets = Array.from(targetsIn).sort((a, b) => a - b);
+  const all: BruteResult[] = [];
+
+  const edge = (a: number, b: number) => flat[a * dim + b]!;
+
+  const visit = (perm: number[], used: boolean[], cost: number, last: number) => {
+    if (perm.length === targets.length) {
+      all.push({ sequence: perm.slice(), cost: cost + edge(last, home) });
+      return;
+    }
+    for (let i = 0; i < targets.length; i++) {
+      if (used[i]) continue;
+      used[i] = true;
+      perm.push(targets[i]!);
+      visit(perm, used, cost + edge(last, targets[i]!), targets[i]!);
+      perm.pop();
+      used[i] = false;
+    }
+  };
+
+  visit([], new Array(targets.length).fill(false), 0, origin);
+  all.sort((a, b) => a.cost - b.cost || compareSequenceLex(a.sequence, b.sequence));
+  return all.slice(0, k);
+}
+
+/** 姿态序列字典序比较（短的公共前缀相同则短者在前） */
+export function compareSequenceLex(a: number[], b: number[]): number {
+  const len = Math.min(a.length, b.length);
+  for (let i = 0; i < len; i++) {
+    if (a[i] !== b[i]) return a[i]! - b[i]!;
+  }
+  return a.length - b.length;
+}
+
+/** 可复现的简单伪随机数（mulberry32） */export function makeRng(seed: number): () => number {
   let a = seed >>> 0;
   return () => {
     a |= 0;

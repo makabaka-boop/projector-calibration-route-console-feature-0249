@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { type CalibrationPlan } from '../solver/plan';
+import { type CandidateRoute } from '../solver/tsp';
 import {
   type ExecutionState,
   confirmNext,
@@ -11,13 +12,15 @@ import {
 
 interface ExecutionConsoleProps {
   plan: CalibrationPlan;
+  /** 工程师在候选集中所选的路线，作为原计划与增量基线；缺省为精确最优（首名） */
+  candidate?: CandidateRoute;
   /** 放弃当前执行（计划不变） */
   onAbort: () => void;
 }
 
-/** 执行台：精确原计划 + 现场改序后每拍精确重排最短后缀。 */
-export function ExecutionConsole({ plan, onAbort }: ExecutionConsoleProps) {
-  const [state, setState] = useState<ExecutionState>(() => startExecution(plan));
+/** 执行台：以所选候选为原计划基线 + 现场改序后每拍精确重排最短后缀。 */
+export function ExecutionConsole({ plan, candidate, onAbort }: ExecutionConsoleProps) {
+  const [state, setState] = useState<ExecutionState>(() => startExecution(plan, candidate));
   const [error, setError] = useState<string>('');
 
   function confirm(pose: number) {
@@ -67,7 +70,11 @@ export function ExecutionConsole({ plan, onAbort }: ExecutionConsoleProps) {
 
         <div className="metric-grid">
           <div className="metric">
-            <div className="label">原计划总耗时（精确最优）</div>
+            <div className="label">
+              {candidate
+                ? `原计划总耗时（第 ${candidate.rank} 名候选）`
+                : '原计划总耗时（精确最优）'}
+            </div>
             <div className="value">{state.original.cost}</div>
           </div>
           <div className="metric">
@@ -79,7 +86,7 @@ export function ExecutionConsole({ plan, onAbort }: ExecutionConsoleProps) {
             <div className="value">{projected}</div>
           </div>
           <div className="metric">
-            <div className="label">相对原计划增量</div>
+            <div className="label">相对原计划增量（次优基线可为负）</div>
             <div className={`value ${delta > 0 ? 'bad' : 'good'}`}>
               {delta > 0 ? `+${delta}` : `${delta}`}
             </div>
@@ -104,12 +111,21 @@ export function ExecutionConsole({ plan, onAbort }: ExecutionConsoleProps) {
       </div>
 
       <div className="panel">
-        <h3>原计划（字典序最小的最优路线）</h3>
+        <h3>
+          {candidate
+            ? `原计划：第 ${candidate.rank} 名候选路线（增量基线）`
+            : '原计划（字典序最小的最优路线）'}
+        </h3>
         <RouteLine
           tour={state.original.tour}
           edgeAt={edgeAt}
           visited={new Set()}
         />
+        {candidate && candidate.rank > 1 && (
+          <div className="hint">
+            当前基线不是精确最优路线；每拍仍按精确最短后缀重排，增量可能为负（优于所选候选）。
+          </div>
+        )}
       </div>
 
       <div className="panel">
@@ -199,12 +215,18 @@ export function ExecutionConsole({ plan, onAbort }: ExecutionConsoleProps) {
                 <td className="num">{state.incurred}</td>
               </tr>
               <tr>
-                <th>原计划最优总耗时</th>
+                <th>原计划基线总耗时{candidate ? `（第 ${candidate.rank} 名候选）` : '（精确最优）'}</th>
                 <td className="num">{state.original.cost}</td>
               </tr>
               <tr>
-                <th>现场改序造成的额外耗时</th>
-                <td className="num">{delta > 0 ? `+${delta}` : '0（与原计划一致）'}</td>
+                <th>相对原计划基线的增量</th>
+                <td className="num">
+                  {delta > 0
+                    ? `+${delta}`
+                    : delta < 0
+                      ? `${delta}（优于所选候选）`
+                      : '0（与原计划一致）'}
+                </td>
               </tr>
             </tbody>
           </table>

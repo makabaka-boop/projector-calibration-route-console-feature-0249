@@ -32,6 +32,22 @@ export interface OptimalRoute {
   solveMs: number;
 }
 
+/** 候选路线：在精确最优基础上带名次（1 = 首名，即字典序最小的精确最优） */
+export interface CandidateRoute extends OptimalRoute {
+  /** 名次（1 起）：按总耗时升序、同费按完整姿态序列字典序升序 */
+  rank: number;
+}
+
+export interface TopCandidatesResult {
+  /** 互异候选路线，不足 TOP_K 条时只含实际数量（不占位、不重复） */
+  candidates: CandidateRoute[];
+  /** 整体求解耗时（毫秒） */
+  solveMs: number;
+}
+
+/** 候选集固定大小：前三名 */
+export const TOP_K = 3;
+
 /**
  * 无穷远哨兵。注意：g 表是 Int32Array，fill 的值必须落在有符号 32 位范围内——
  * 1_000_000_000 会被截断成 0（曾静默污染整张表），故取 10_000_000：
@@ -168,4 +184,216 @@ function elapsedMs(started: number): number {
       ? performance.now()
       : Date.now();
   return now - started;
+}
+
+/**
+ * 候选路线集：一次 Held–Karp 求出按“总耗时升序、同费按完整姿态序列字典序升序”的
+ * 前三条互异精确路线。不是靠禁用首选路线的边反复调用单最优求解器，而是把每个
+ * DP 状态从单个最优值扩展为固定 TOP_K 个不同后缀及其子排名：
+ *
+ *   best[mask][i][r] = 从 target[i] 出发、恰好访问 mask 中全部目标、最后回到 home
+ *                      的第 r+1 好的互异后缀耗时（r = 0..TOP_K-1）
+ *   pick[mask][i][r] = 该后缀的第一步选择：j * TOP_K + r'，表示下一段走 target[j]，
+ *                      并接 best[mask\{j}][j][r']（确定性恢复的指针）
+ *
+ * 递推时把每个 j ∈ mask 的子状态候选（已按 (费用, 序列字典序) 排好）按
+ * (总费用, j 升序, 子排名升序) 归并取前三。该比较键与全局排序键等价：
+ * 同费时先比首姿态编号（即 j），同 j 时子序列顺序即子排名顺序。
+ * 同一 (j, 子排名) 唯一确定一条后缀，不同候选对天然互异，故归并结果即
+ * 该状态全部互异后缀的前三名——标准 k-best 最优子结构成立：
+ * 若某后缀的子后缀排在子状态前三之外，则至少有 TOP_K 条完整后缀严格排在它前面。
+ *
+ * 存储保持紧凑：costs 用 Int32Array、pick 用 Uint8Array（j*TOP_K+r' ≤ 59，0xFF 为空），
+ * m=18 时约 57 MB + 14 MB。恢复路线只沿 pick 指针走，完全确定。
+ */
+export function solveTopCandidates(
+  flat: ArrayLike<number>,
+  dim: number,
+  targets: ArrayLike<number>,
+  origin: number,
+  home: number,
+): TopCandidatesResult {
+  const started =
+    typeof performance !== 'undefined' && typeof performance.now === 'function'
+      ? performance.now()
+      : Date.now();
+
+  const m = targets.length;
+  const sorted = Array.from(targets).sort((a, b) => a - b);
+
+  const edge = (a: number, b: number): number => flat[a * dim + b]!;
+
+  // 无目标：只剩 origin -> home 一条边，唯一一条“路线”。
+  if (m === 0) {
+    const cost = edge(origin, home);
+    const solveMs = elapsedMs(started);
+    return {
+      candidates: [
+        { rank: 1, sequence: [], tour: [origin, home], cost, targetCount: 0, solveMs },
+      ],
+      solveMs,
+    };
+  }
+  if (m > 18) {
+    // 候选表是单最优表的 TOP_K 倍，m=18 已约 71 MB；计划域 N ≤ 18，足够。
+    throw new Error(`候选求解目标数量 ${m} 超出支持上限（18）`);
+  }
+
+  const K = TOP_K;
+  const EMPTY = 0xff;
+  const size = 1 << m;
+  const full = size - 1;
+
+  // best[(mask * m + i) * K + r]，仅 i ∉ mask 时有意义；pick 同形。
+  const costs = new Int32Array(size * m * K).fill(INF);
+  const pick = new Uint8Array(size * m * K).fill(EMPTY);
+
+  // 边界：mask = 0，从每个目标直接回家，只有第 1 名。
+  for (let i = 0; i < m; i++) {
+    costs[i * K] = edge(sorted[i]!, home);
+  }
+
+  // 递推：按 mask 数值升序，依赖（去掉一位）必然先算。
+  for (let mask = 1; mask < size; mask++) {
+    const rowBase = mask * m * K;
+    let complement = full ^ mask;
+    while (complement !== 0) {
+      const i = countTrailingZeros(complement);
+      complement &= complement - 1;
+
+      const fromRow = sorted[i]! * dim;
+      // 归并 j ∈ mask 的子候选，按 (费用, j, 子排名) 取前三；标量槽避免内层分配。
+      let c1 = INF;
+      let p1 = EMPTY;
+      let c2 = INF;
+      let p2 = EMPTY;
+      let c3 = INF;
+      let p3 = EMPTY;
+      let members = mask;
+      while (members !== 0) {
+        const j = countTrailingZeros(members);
+        members &= members - 1;
+
+        const e = flat[fromRow + sorted[j]!]!;
+        const childBase = ((mask ^ (1 << j)) * m + j) * K;
+        for (let r = 0; r < K; r++) {
+          const child = costs[childBase + r]!;
+          if (child >= INF) break; // 子排名费用非降，之后全是空槽
+          const cand = e + child;
+          const packed = j * K + r;
+          // 严格小于才前移：枚举顺序已是 (j 升序, r 升序)，同费时先枚举者排前
+          if (cand < c1) {
+            c3 = c2;
+            p3 = p2;
+            c2 = c1;
+            p2 = p1;
+            c1 = cand;
+            p1 = packed;
+          } else if (cand < c2) {
+            c3 = c2;
+            p3 = p2;
+            c2 = cand;
+            p2 = packed;
+          } else if (cand < c3) {
+            c3 = cand;
+            p3 = packed;
+          }
+        }
+      }
+      const slot = rowBase + i * K;
+      costs[slot] = c1;
+      pick[slot] = p1;
+      costs[slot + 1] = c2;
+      pick[slot + 1] = p2;
+      costs[slot + 2] = c3;
+      pick[slot + 2] = p3;
+    }
+  }
+
+  // 顶层归并：从 origin 出发的第一步，同样按 (总费用, 首姿态, 子排名) 取前三。
+  const topCost: number[] = [];
+  const topPick: number[] = [];
+  {
+    let c1 = INF;
+    let p1 = EMPTY;
+    let c2 = INF;
+    let p2 = EMPTY;
+    let c3 = INF;
+    let p3 = EMPTY;
+    for (let i = 0; i < m; i++) {
+      const e = edge(origin, sorted[i]!);
+      const stateBase = ((full ^ (1 << i)) * m + i) * K;
+      for (let r = 0; r < K; r++) {
+        const child = costs[stateBase + r]!;
+        if (child >= INF) break;
+        const cand = e + child;
+        const packed = i * K + r;
+        if (cand < c1) {
+          c3 = c2;
+          p3 = p2;
+          c2 = c1;
+          p2 = p1;
+          c1 = cand;
+          p1 = packed;
+        } else if (cand < c2) {
+          c3 = c2;
+          p3 = p2;
+          c2 = cand;
+          p2 = packed;
+        } else if (cand < c3) {
+          c3 = cand;
+          p3 = packed;
+        }
+      }
+    }
+    if (c1 < INF) {
+      topCost.push(c1);
+      topPick.push(p1);
+    }
+    if (c2 < INF) {
+      topCost.push(c2);
+      topPick.push(p2);
+    }
+    if (c3 < INF) {
+      topCost.push(c3);
+      topPick.push(p3);
+    }
+  }
+
+  // 沿 pick 指针确定性地恢复每条候选（不再排序、不再搜索）。
+  const candidates: CandidateRoute[] = [];
+  for (let q = 0; q < topPick.length; q++) {
+    const sequence: number[] = [];
+    const tour: number[] = [origin];
+    let cur = origin;
+    let total = 0;
+    let mask = full;
+    let packed = topPick[q]!;
+    for (;;) {
+      const idx = (packed / K) | 0;
+      const rank = packed % K;
+      const pose = sorted[idx]!;
+      sequence.push(pose);
+      tour.push(pose);
+      total += edge(cur, pose);
+      cur = pose;
+      mask &= ~(1 << idx); // 从剩余集合移除该位
+      if (mask === 0) break;
+      packed = pick[(mask * m + idx) * K + rank]!;
+    }
+    total += edge(cur, home);
+    tour.push(home);
+    candidates.push({
+      rank: q + 1,
+      sequence,
+      tour,
+      cost: total,
+      targetCount: m,
+      solveMs: 0, // 统一在末尾赋值
+    });
+  }
+
+  const solveMs = elapsedMs(started);
+  for (const c of candidates) c.solveMs = solveMs;
+  return { candidates, solveMs };
 }

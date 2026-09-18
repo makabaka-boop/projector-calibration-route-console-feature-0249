@@ -8,6 +8,7 @@ import {
   routeCost,
   startExecution,
 } from './execution';
+import { solveTopCandidates } from './tsp';
 import { bruteForceOptimal, makeRng, randomMatrix } from './brute';
 
 function planFromFlat(n: number, flat: number[]): CalibrationPlan {
@@ -142,5 +143,55 @@ describe('现场执行与逐步重排', () => {
     state = finishReturn(state);
     expect(() => confirmNext(state, 1)).toThrow(/已结案/);
     expect(() => finishReturn(state)).toThrow(/已结案/);
+  });
+
+  it('以次优候选为原计划基线：后缀仍逐拍精确，增量允许为负', () => {
+    const n = 6;
+    const flat = randomMatrix(n + 1, makeRng(20260918));
+    const plan = planFromFlat(n, flat);
+    const targets = Array.from({ length: n }, (_, k) => k + 1);
+    const top = solveTopCandidates(flat, n + 1, targets, 0, 0);
+    expect(top.candidates).toHaveLength(3);
+
+    const optimal = top.candidates[0]!;
+    const chosen = top.candidates[2]!; // 改选第三名（次优）作为基线
+    expect(chosen.cost).toBeGreaterThan(optimal.cost); // 该种子下费用严格递增
+
+    // 基线 = 所选候选；初始后缀仍是精确最优
+    let state = startExecution(plan, chosen);
+    expect(state.original.cost).toBe(chosen.cost);
+    expect(state.suffix.cost).toBe(optimal.cost);
+    expect(state.suffix.sequence).toEqual(optimal.sequence);
+    // 未走任何一步，预计完工已低于所选次优基线 → 增量为负
+    expect(deltaVsOriginal(state)).toBe(optimal.cost - chosen.cost);
+    expect(deltaVsOriginal(state)).toBeLessThan(0);
+
+    // 每一拍确认后仍计算精确最短后缀（与穷举一致），增量恒为 最优−次优 < 0
+    while (state.remaining.length > 0) {
+      state = confirmNext(state, state.suffix.sequence[0]!);
+      const brute = bruteForceOptimal(flat, n + 1, state.remaining, state.current, 0);
+      expect(state.suffix.cost).toBe(brute.cost);
+      expect(state.suffix.sequence).toEqual(brute.sequence);
+      expect(projectedTotal(state)).toBe(state.incurred + brute.cost);
+      expect(deltaVsOriginal(state)).toBe(projectedTotal(state) - chosen.cost);
+      expect(deltaVsOriginal(state)).toBeLessThan(0);
+    }
+
+    state = finishReturn(state);
+    expect(state.incurred).toBe(optimal.cost);
+    expect(deltaVsOriginal(state)).toBe(optimal.cost - chosen.cost);
+  });
+
+  it('默认基线（不传候选）等于候选首名，沿推荐走增量恒为 0', () => {
+    const n = 7;
+    const flat = randomMatrix(n + 1, makeRng(424242));
+    const plan = planFromFlat(n, flat);
+    const targets = Array.from({ length: n }, (_, k) => k + 1);
+    const top = solveTopCandidates(flat, n + 1, targets, 0, 0);
+
+    const state = startExecution(plan);
+    expect(state.original.cost).toBe(top.candidates[0]!.cost);
+    expect(state.original.sequence).toEqual(top.candidates[0]!.sequence);
+    expect(deltaVsOriginal(state)).toBe(0);
   });
 });
